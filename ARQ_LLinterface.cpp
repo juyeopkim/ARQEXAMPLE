@@ -5,6 +5,7 @@
 #include "ARQ_parameters.h"
 
 #define ARQLLI_MAX_PDUSIZE      50
+#define ARQ_LOSSRATE			0
 
 static uint8_t txType;
 static uint8_t rcvdData[ARQLLI_MAX_PDUSIZE];
@@ -27,7 +28,10 @@ void arqLLI_dataCnfFunc(int err)
 //interface event : DATA_IND, RX data has arrived
 void arqLLI_dataIndFunc(uint8_t srcId, uint8_t* dataPtr, uint8_t size)
 {
-    debug_if(DBGMSG_ARQ, "\n --> DATA IND : src:%i, size:%i\n", srcId, size);
+	if (rand()%10 < ARQ_LOSSRATE)
+		return;
+
+	debug_if(DBGMSG_ARQ, "\n --> DATA IND : src:%i, size:%i\n", srcId, size);
 
     memcpy(rcvdData, dataPtr, size*sizeof(uint8_t));
     rcvdSrc = srcId;

@@ -10,6 +10,7 @@
 //FSM state -------------------------------------------------
 #define MAINSTATE_IDLE              0
 #define MAINSTATE_TX                1
+#define MAINSTATE_ACK				2
 
 //GLOBAL variables (DO NOT TOUCH!) ------------------------------------------
 //serial port interface
@@ -113,11 +114,17 @@ int main(void){
                     uint8_t srcId = arqLLI_getSrcId();
                     uint8_t* dataPtr = arqLLI_getRcvdDataPtr();
                     uint8_t size = arqLLI_getSize();
+					uint8_t rxSeqNum = arqMsg_getSeq(dataPtr);
 
                     pc.printf("\n -------------------------------------------------\nRCVD from %i : %s (length:%i, seq:%i)\n -------------------------------------------------\n", 
-                                srcId, arqMsg_getWord(dataPtr), size, arqMsg_getSeq(dataPtr));
+                                srcId, arqMsg_getWord(dataPtr), size, rxSeqNum);
 
-                    main_state = MAINSTATE_IDLE;
+					pduSize = arqMsg_encodeAck(arqAck, rxSeqNum);
+                    arqLLI_sendData(arqAck, ARQMSG_ACKSIZE, srcId);
+
+                    pc.printf("[MAIN] sending ACK to %i (seq:%i)\n", srcId, rxSeqNum);
+
+                    main_state = MAINSTATE_TX;
                     flag_needPrint = 1;
 
                     arqEvent_clearEventFlag(arqEvent_dataRcvd);
@@ -128,6 +135,9 @@ int main(void){
                     pduSize = arqMsg_encodeData(arqPdu, originalWord, seqNum, wordLen);
                     arqLLI_sendData(arqPdu, pduSize, dest_ID);
 
+					seqNum = (seqNum+1)%ARQMSSG_MAX_SEQNUM;
+					retxCnt = 0;
+
                     pc.printf("[MAIN] sending to %i (seq:%i)\n", dest_ID, (seqNum-1)%ARQMSSG_MAX_SEQNUM);
 
                     main_state = MAINSTATE_TX;
@@ -136,6 +146,22 @@ int main(void){
                     wordLen = 0;
                     arqEvent_clearEventFlag(arqEvent_dataToSend);
                 }
+				else if (arqEvent_checkEventFlag(arqEvent_dataTxDone)) //if data needs to be sent (keyboard input)
+				{
+					pc.printf("[MAIN][ERROR] Cannot happen event %i at state %i\n", arqEvent_dataTxDone, main_state);
+					arqEvent_clearEventFlag(arqEvent_dataTxDone);
+				}
+				else if (arqEvent_checkEventFlag(arqEvent_ackTxDone)) //if data needs to be sent (keyboard input)
+				{
+					pc.printf("[MAIN][ERROR] Cannot happen event %i at state %i\n", arqEvent_ackTxDone, main_state);
+					arqEvent_clearEventFlag(arqEvent_ackTxDone);
+				}
+
+				else if (arqEvent_checkEventFlag(arqEvent_ackRcvd)) //if data needs to be sent (keyboard input)
+				{
+					pc.printf("[MAIN][ERROR] Cannot happen event %i at state %i\n", arqEvent_ackRcvd, main_state);
+					arqEvent_clearEventFlag(arqEvent_ackRcvd);
+				}
                 else if (flag_needPrint == 1)
                 {
                     pc.printf("Give a word to send : ");
@@ -146,14 +172,77 @@ int main(void){
 
             case MAINSTATE_TX: //IDLE state description
 
-                if (arqEvent_checkEventFlag(arqEvent_dataTxDone)) //data TX finished
-                {
-                    main_state = MAINSTATE_IDLE;
-                    arqEvent_clearEventFlag(arqEvent_dataTxDone);
-                }
+                if (arqEvent_checkEventFlag(arqEvent_dataTxDone))
+				{
+					arqTimer_startTimer();
+
+					main_state = MAINSTATE_ACK;
+					arqEvent_clearEventFlag(arqEvent_dataTxDone);
+				}
+				else if (arqEvent_checkEventFlag(arqEvent_ackTxDone))
+				{
+					if (arqTimer_getTimerStatus() == 0 && arqEvent_checkEventFlag(arqEvent_arqTimeout)== 0)//timer is running
+					{
+						main_state = MAINSTATE_IDLE;
+					}
+					else
+					{
+						main_state = MAINSTATE_ACK;
+					}
+					arqEvent_clearEventFlag(arqEvent_ackTxDone);
+				}
+				else if (arqEvent_checkEventFlag(arqEvent_dataToSend)) //if data needs to be sent (keyboard input)
+				{
+					pc.printf("[MAIN][ERROR] Cannot happen event %i at state %i\n", arqEvent_dataToSend, main_state);
+					arqEvent_clearEventFlag(arqEvent_dataToSend);
+				}
 
                 break;
+				
+			case MAINSTATE_ACK:
+				if (arqEvent_checkEventFlag(arqEvent_ackRcvd))
+				{
+					pc.printf("ACK received for PDU %i\n",seqNum-1);
+					arqTimer_stopTimer();
+					main_state = MAINSTATE_IDLE;
+					arqEvent_clearEventFlag(arqEvent_ackRcvd);
+				}
+				else if (arqEvent_checkEventFlag(arqEvent_dataRcvd))
+				{
+					//Retrieving data info.
+                    uint8_t srcId = arqLLI_getSrcId();
+                    uint8_t* dataPtr = arqLLI_getRcvdDataPtr();
+                    uint8_t size = arqLLI_getSize();
+					uint8_t rxSeqNum = arqMsg_getSeq(dataPtr);
 
+                    pc.printf("\n -------------------------------------------------\nRCVD from %i : %s (length:%i, seq:%i)\n -------------------------------------------------\n", 
+                                srcId, arqMsg_getWord(dataPtr), size, rxSeqNum);
+
+					pduSize = arqMsg_encodeAck(arqAck, rxSeqNum);
+                    arqLLI_sendData(arqAck, ARQMSG_ACKSIZE, srcId);
+
+                    pc.printf("[MAIN] sending ACK to %i (seq:%i)\n", srcId, rxSeqNum);
+
+                    main_state = MAINSTATE_TX;
+					arqEvent_clearEventFlag(arqEvent_dataRcvd);
+				}
+				else if (arqEvent_checkEventFlag(arqEvent_arqTimeout))
+				{
+					if (retxCnt < ARQ_MAXRETRANSMISSION)
+					{
+						arqLLI_sendData(arqPdu, pduSize, dest_ID);
+						retxCnt = retxCnt + 1;
+						main_state = MAINSTATE_TX;
+					}
+					else
+					{
+						main_state = MAINSTATE_IDLE;
+					}					
+					arqEvent_clearEventFlag(arqEvent_arqTimeout);
+				}
+			
+			
+				break;
             default :
                 break;
         }
